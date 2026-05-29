@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  infinitytable-server:
+    image: infinitytable/server:latest
+    container_name: it_dedicated_server
+    restart: unless-stopped
+
+    ports:
+      - "7777:7777/udp"   # Game traffic
+      - "7778:7778/tcp"   # Query port
+      - "27015:27015/udp" # Steam query
+
+    environment:
+      - IT_MAX_PLAYERS=6
+      - IT_SERVER_NAME=InfinityTable Dedicated Server
+      - IT_MAP=TableMap
+      - IT_PASSWORD=
+      - IT_PORT=7777
+      - IT_LOG_LEVEL=Log
+
+    volumes:
+      - ./saves:/app/Saved
+      - ./mods:/app/Mods
+      - ./logs:/app/Saved/Logs
+
+    healthcheck:
+      test: ["CMD", "nc", "-zu", "127.0.0.1", "7777"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
