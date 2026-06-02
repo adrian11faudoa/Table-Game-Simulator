@@ -1,0 +1,11 @@
+{
+  "id": "dice_battle",
+  "name": "Dice Battle",
+  "version": "1.0.0",
+  "author": "InfinityTable Team",
+  "description": "Roll 2d6 each turn. First to 50 wins. Doubles = roll again!",
+  "entry": "scripts/main.lua",
+  "tags": ["dice", "party", "2-6-players"],
+  "minEngineVersion": "0.1.0",
+  "permissions": ["spawnObjects", "networkSync", "showUI"]
+}

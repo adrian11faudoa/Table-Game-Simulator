@@ -1,0 +1,26 @@
+{
+  "id": "chess_classic",
+  "name": "Classic Chess",
+  "version": "1.0.0",
+  "author": "InfinityTable Team",
+  "description": "Standard 8x8 chess for 2 players with full move validation.",
+  "entry": "scripts/main.lua",
+  "tags": ["board-game", "2-player", "classic", "strategy"],
+  "minEngineVersion": "0.1.0",
+  "permissions": ["spawnObjects", "networkSync", "showUI"],
+  "objects": [
+    { "id": "chess_board",  "mesh": "assets/board.obj",   "texture": "assets/board.png",  "mass": 0.5  },
+    { "id": "pawn_white",   "mesh": "assets/pawn.obj",    "texture": "assets/white.png",  "mass": 0.03 },
+    { "id": "pawn_black",   "mesh": "assets/pawn.obj",    "texture": "assets/black.png",  "mass": 0.03 },
+    { "id": "rook_white",   "mesh": "assets/rook.obj",    "texture": "assets/white.png",  "mass": 0.05 },
+    { "id": "rook_black",   "mesh": "assets/rook.obj",    "texture": "assets/black.png",  "mass": 0.05 },
+    { "id": "knight_white", "mesh": "assets/knight.obj",  "texture": "assets/white.png",  "mass": 0.05 },
+    { "id": "knight_black", "mesh": "assets/knight.obj",  "texture": "assets/black.png",  "mass": 0.05 },
+    { "id": "bishop_white", "mesh": "assets/bishop.obj",  "texture": "assets/white.png",  "mass": 0.05 },
+    { "id": "bishop_black", "mesh": "assets/bishop.obj",  "texture": "assets/black.png",  "mass": 0.05 },
+    { "id": "queen_white",  "mesh": "assets/queen.obj",   "texture": "assets/white.png",  "mass": 0.06 },
+    { "id": "queen_black",  "mesh": "assets/queen.obj",   "texture": "assets/black.png",  "mass": 0.06 },
+    { "id": "king_white",   "mesh": "assets/king.obj",    "texture": "assets/white.png",  "mass": 0.06 },
+    { "id": "king_black",   "mesh": "assets/king.obj",    "texture": "assets/black.png",  "mass": 0.06 }
+  ]
+}

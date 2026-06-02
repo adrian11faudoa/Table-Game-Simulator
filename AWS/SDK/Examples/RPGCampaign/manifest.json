@@ -1,0 +1,18 @@
+{
+  "id": "rpg_dungeon",
+  "name": "Dungeon Campaign",
+  "version": "1.0.0",
+  "author": "InfinityTable Team",
+  "description": "Full D&D-style RPG session: fog of war, initiative, character stats, GM tools.",
+  "entry": "scripts/main.lua",
+  "tags": ["rpg", "dnd", "gm-tools", "fog-of-war"],
+  "minEngineVersion": "0.1.0",
+  "permissions": ["spawnObjects", "networkSync", "showUI"],
+  "objects": [
+    { "id": "dungeon_floor",  "mesh": "assets/floor.obj",   "texture": "assets/stone.png",  "mass": 10  },
+    { "id": "dungeon_wall",   "mesh": "assets/wall.obj",    "texture": "assets/stone.png",  "mass": 10  },
+    { "id": "hero_token",     "mesh": "assets/hero.obj",    "texture": "assets/hero.png",   "mass": 0.03},
+    { "id": "enemy_token",    "mesh": "assets/enemy.obj",   "texture": "assets/enemy.png",  "mass": 0.03},
+    { "id": "chest_token",    "mesh": "assets/chest.obj",   "texture": "assets/chest.png",  "mass": 0.05}
+  ]
+}

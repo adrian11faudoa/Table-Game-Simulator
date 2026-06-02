@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  game-server:
+    image: infinitytable/server:latest
+    container_name: it_server
+    restart: unless-stopped
+    network_mode: host   # Required for UDP game traffic on AWS
+
+    environment:
+      - IT_MAX_PLAYERS=${IT_MAX_PLAYERS:-6}
+      - IT_SERVER_NAME=${IT_SERVER_NAME:-InfinityTable Server}
+      - IT_PORT=7777
+      - IT_QUERY_PORT=7778
+      - IT_PASSWORD=${IT_PASSWORD:-}
+      - IT_MAP=${IT_MAP:-TableMap}
+      - IT_LOG_LEVEL=Log
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - S3_BUCKET=${S3_BUCKET:-}
+
+    volumes:
+      - /opt/infinitytable/Saved:/app/Saved
+      - /opt/infinitytable/Mods:/app/Mods
+      - /opt/infinitytable/Logs:/app/Logs
+      - /opt/infinitytable/Config:/app/Config
+
+    healthcheck:
+      test: ["CMD", "nc", "-zu", "127.0.0.1", "7777"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_DEFAULT_REGION:-us-east-1}
+        awslogs-group: /infinitytable/server
+        awslogs-create-group: "true"
+
+  # S3 save sync sidecar
+  save-sync:
+    image: amazon/aws-cli:latest
+    container_name: it_save_sync
+    restart: unless-stopped
+    depends_on:
+      - game-server
+    environment:
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - S3_BUCKET=${S3_BUCKET:-}
+    volumes:
+      - /opt/infinitytable/Saved:/saves:ro
+    entrypoint: >
+      sh -c "while true; do
+        aws s3 sync /saves s3://$${S3_BUCKET}/saves/ --quiet;
+        sleep 300;
+      done"

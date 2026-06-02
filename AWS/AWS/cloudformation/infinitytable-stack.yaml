@@ -1,0 +1,442 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: InfinityTable Dedicated Game Server Stack on AWS
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: c5.xlarge
+    AllowedValues: [t3.medium, c5.large, c5.xlarge, c5.2xlarge]
+    Description: EC2 instance type (c5.xlarge recommended for 6-player sessions)
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair for SSH access
+
+  ServerPassword:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Optional server password (leave blank for public)
+
+  MaxPlayers:
+    Type: Number
+    Default: 6
+    MinValue: 2
+    MaxValue: 20
+
+  AMIId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 AMI (auto-updated)
+
+Mappings:
+  RegionMap:
+    us-east-1:      { AMI: ami-0abcdef1234567890 }
+    us-west-2:      { AMI: ami-0abcdef1234567891 }
+    eu-west-1:      { AMI: ami-0abcdef1234567892 }
+    ap-southeast-1: { AMI: ami-0abcdef1234567893 }
+
+Resources:
+
+  # ── VPC & Networking ──────────────────────────────────────
+  InfinityTableVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: InfinityTable-VPC
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref InfinityTableVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref InfinityTableVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref InfinityTableVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ── Security Group ────────────────────────────────────────
+  GameServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: InfinityTable Game Server Security Group
+      VpcId: !Ref InfinityTableVPC
+      SecurityGroupIngress:
+        # Game traffic (UDP)
+        - IpProtocol: udp
+          FromPort: 7777
+          ToPort: 7777
+          CidrIp: 0.0.0.0/0
+        # Query port (TCP)
+        - IpProtocol: tcp
+          FromPort: 7778
+          ToPort: 7778
+          CidrIp: 0.0.0.0/0
+        # SSH (restrict to your IP in production!)
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        # HTTP (admin panel / health check)
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        # HTTPS
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: InfinityTable-SG
+
+  # ── IAM Role for EC2 ──────────────────────────────────────
+  GameServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: InfinityTableServerRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: InfinityTableS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::infinitytable-saves-${AWS::AccountId}
+                  - !Sub arn:aws:s3:::infinitytable-saves-${AWS::AccountId}/*
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  GameServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref GameServerRole
+
+  # ── S3 Bucket for saves & mods ────────────────────────────
+  SavesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub infinitytable-saves-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ── EC2 Instance ──────────────────────────────────────────
+  GameServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AMIId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref GameServerInstanceProfile
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref GameServerSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 40
+            VolumeType: gp3
+            Iops: 3000
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: InfinityTable-GameServer
+        - Key: Project
+          Value: InfinityTable
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > /var/log/infinitytable-setup.log 2>&1
+
+          echo "=== InfinityTable Server Setup ==="
+          echo "Instance: ${InstanceType}"
+          echo "MaxPlayers: ${MaxPlayers}"
+
+          # System update
+          dnf update -y
+          dnf install -y docker nginx awscli htop wget unzip
+
+          # Start Docker
+          systemctl enable docker
+          systemctl start docker
+
+          # Create app directories
+          mkdir -p /opt/infinitytable/{Saved,Mods,Logs,Config}
+
+          # Write server config
+          cat > /opt/infinitytable/Config/ServerConfig.json << EOF
+          {
+            "MaxPlayers": ${MaxPlayers},
+            "ServerPassword": "${ServerPassword}",
+            "Map": "TableMap",
+            "Port": 7777,
+            "QueryPort": 7778,
+            "LogLevel": "Log",
+            "S3Bucket": "infinitytable-saves-${AWS::AccountId}",
+            "Region": "${AWS::Region}"
+          }
+          EOF
+
+          # Pull and start the game server container
+          docker pull infinitytable/server:latest || true
+
+          cat > /opt/infinitytable/docker-compose.yml << EOF
+          version: '3.8'
+          services:
+            game-server:
+              image: infinitytable/server:latest
+              container_name: it_server
+              restart: unless-stopped
+              network_mode: host
+              environment:
+                - IT_MAX_PLAYERS=${MaxPlayers}
+                - IT_SERVER_NAME=InfinityTable AWS Server
+                - IT_PORT=7777
+                - IT_PASSWORD=${ServerPassword}
+                - IT_MAP=TableMap
+                - AWS_DEFAULT_REGION=${AWS::Region}
+                - S3_BUCKET=infinitytable-saves-${AWS::AccountId}
+              volumes:
+                - /opt/infinitytable/Saved:/app/Saved
+                - /opt/infinitytable/Mods:/app/Mods
+                - /opt/infinitytable/Logs:/app/Logs
+              healthcheck:
+                test: ["CMD", "nc", "-zu", "127.0.0.1", "7777"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+          EOF
+
+          # Install CloudWatch agent
+          wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+          rpm -U ./amazon-cloudwatch-agent.rpm
+
+          cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'CWEOF'
+          {
+            "agent": { "metrics_collection_interval": 60 },
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    { "file_path": "/opt/infinitytable/Logs/*.log",
+                      "log_group_name": "/infinitytable/server",
+                      "log_stream_name": "{instance_id}" }
+                  ]
+                }
+              }
+            },
+            "metrics": {
+              "metrics_collected": {
+                "cpu":  { "measurement": ["cpu_usage_active"], "metrics_collection_interval": 60 },
+                "mem":  { "measurement": ["mem_used_percent"],  "metrics_collection_interval": 60 },
+                "disk": { "measurement": ["disk_used_percent"], "metrics_collection_interval": 60 }
+              }
+            }
+          }
+          CWEOF
+
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl             -a fetch-config -m ec2             -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+
+          # Configure Nginx reverse proxy / health endpoint
+          cat > /etc/nginx/conf.d/infinitytable.conf << 'NGEOF'
+          server {
+              listen 80;
+              server_name _;
+
+              location /health {
+                  access_log off;
+                  return 200 '{"status":"ok","service":"InfinityTable"}';
+                  add_header Content-Type application/json;
+              }
+
+              location /status {
+                  return 200 '{"server":"InfinityTable","port":7777}';
+                  add_header Content-Type application/json;
+              }
+          }
+
+          stream {
+              upstream game_udp {
+                  server 127.0.0.1:7777;
+              }
+          }
+          NGEOF
+
+          systemctl enable nginx
+          systemctl start nginx
+
+          # Create systemd service for docker compose
+          cat > /etc/systemd/system/infinitytable.service << 'SVCEOF'
+          [Unit]
+          Description=InfinityTable Game Server
+          Requires=docker.service
+          After=docker.service network-online.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          WorkingDirectory=/opt/infinitytable
+          ExecStart=/usr/bin/docker compose up -d
+          ExecStop=/usr/bin/docker compose down
+          TimeoutStartSec=120
+
+          [Install]
+          WantedBy=multi-user.target
+          SVCEOF
+
+          systemctl daemon-reload
+          systemctl enable infinitytable
+          systemctl start infinitytable
+
+          echo "=== Setup Complete ==="
+
+  # ── Elastic IP ────────────────────────────────────────────
+  GameServerEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref GameServerInstance
+      Tags:
+        - Key: Name
+          Value: InfinityTable-EIP
+
+  # ── CloudWatch Alarms ─────────────────────────────────────
+  HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: InfinityTable-HighCPU
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref GameServerInstance
+      AlarmDescription: CPU > 85% for 10 minutes
+
+  # ── CloudWatch Dashboard ──────────────────────────────────
+  GameServerDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: InfinityTable-Server
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "CPU Utilization",
+                "metrics": [["AWS/EC2","CPUUtilization","InstanceId","${GameServerInstance}"]],
+                "period": 60, "stat": "Average", "view": "timeSeries"
+              }
+            },
+            {
+              "type": "log", "x": 0, "y": 6, "width": 24, "height": 6,
+              "properties": {
+                "title": "Server Logs",
+                "query": "SOURCE '/infinitytable/server' | fields @timestamp, @message | sort @timestamp desc | limit 100",
+                "region": "${AWS::Region}", "view": "table"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ServerPublicIP:
+    Description: Public IP address to connect to
+    Value: !Ref GameServerEIP
+    Export:
+      Name: InfinityTable-ServerIP
+
+  ServerDNS:
+    Description: Public DNS hostname
+    Value: !GetAtt GameServerInstance.PublicDnsName
+
+  ConnectionString:
+    Description: Use this IP:PORT in InfinityTable client
+    Value: !Sub "${GameServerEIP}:7777"
+
+  SSHCommand:
+    Description: SSH into server
+    Value: !Sub "ssh -i ${KeyName}.pem ec2-user@${GameServerEIP}"
+
+  HealthCheckURL:
+    Description: Server health endpoint
+    Value: !Sub "http://${GameServerEIP}/health"
+
+  S3SavesBucket:
+    Description: S3 bucket for save files
+    Value: !Ref SavesBucket
+
+  CloudWatchDashboard:
+    Description: CloudWatch monitoring dashboard
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home#dashboards:name=InfinityTable-Server"
