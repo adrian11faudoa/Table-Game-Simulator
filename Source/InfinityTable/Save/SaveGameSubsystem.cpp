@@ -1,34 +1,28 @@
-#include "SaveGameSubsystem.h"
-#include "sqlite3.h"
-#include "JsonObjectConverter.h"
+#include "Save/SaveGameSubsystem.h"
 #include "Objects/TableSpawnManager.h"
+#include "Engine/World.h"
 #include "EngineUtils.h"
+#include "JsonObjectConverter.h"
+#include "HAL/PlatformFileManager.h"
+#include "Misc/Paths.h"
+#include "TimerManager.h"
+
+// SQLite3 amalgamation (see ThirdParty/sqlite3/, fetched via ThirdParty/install.bat or .sh)
+#include "sqlite3.h"
 
 void USaveGameSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
-
     DBPath = FPaths::ProjectSavedDir() / TEXT("InfinityTable.db");
-    if (!OpenDB()) return;
-
-    ExecSQL(R"(
-        CREATE TABLE IF NOT EXISTS save_slots (
-            slot        TEXT PRIMARY KEY,
-            name        TEXT NOT NULL,
-            environment TEXT DEFAULT 'FantasyTavern',
-            timestamp   INTEGER NOT NULL,
-            obj_count   INTEGER DEFAULT 0,
-            data        TEXT NOT NULL
-        );
-    )");
+    OpenDB();
 
     // Autosave timer
-    GetGameInstance()->GetWorld()->GetTimerManager().SetTimer(
-        AutosaveTimer,
-        this, &USaveGameSubsystem::AutoSave,
-        AutosaveIntervalSeconds, true);
-
-    UE_LOG(LogTemp, Log, TEXT("SaveGameSubsystem: DB ready at %s"), *DBPath);
+    if (UWorld* World = GetWorld())
+    {
+        World->GetTimerManager().SetTimer(
+            AutosaveTimer, this, &USaveGameSubsystem::AutoSave,
+            AutosaveIntervalSeconds, true);
+    }
 }
 
 void USaveGameSubsystem::Deinitialize()
@@ -39,16 +33,19 @@ void USaveGameSubsystem::Deinitialize()
 
 bool USaveGameSubsystem::OpenDB()
 {
-    sqlite3* RawDB = nullptr;
-    int Rc = sqlite3_open(TCHAR_TO_UTF8(*DBPath), &RawDB);
-    if (Rc != SQLITE_OK)
-    {
-        UE_LOG(LogTemp, Error, TEXT("SaveSystem: Cannot open DB: %s"),
-            UTF8_TO_TCHAR(sqlite3_errmsg(RawDB)));
-        sqlite3_close(RawDB);
-        return false;
-    }
-    DB = RawDB;
+    if (DB) return true;
+    int rc = sqlite3_open(TCHAR_TO_UTF8(*DBPath), (sqlite3**)&DB);
+    if (rc != SQLITE_OK) { DB = nullptr; return false; }
+
+    ExecSQL(TEXT(
+        "CREATE TABLE IF NOT EXISTS saves ("
+        "  slot      TEXT PRIMARY KEY,"
+        "  name      TEXT NOT NULL,"
+        "  environment TEXT NOT NULL,"
+        "  timestamp INTEGER NOT NULL,"
+        "  data      TEXT NOT NULL"
+        ");"
+    ));
     return true;
 }
 
@@ -61,13 +58,8 @@ bool USaveGameSubsystem::ExecSQL(const FString& SQL)
 {
     if (!DB) return false;
     char* ErrMsg = nullptr;
-    int Rc = sqlite3_exec((sqlite3*)DB, TCHAR_TO_UTF8(*SQL), nullptr, nullptr, &ErrMsg);
-    if (Rc != SQLITE_OK)
-    {
-        UE_LOG(LogTemp, Error, TEXT("SQL Error: %s"), UTF8_TO_TCHAR(ErrMsg));
-        sqlite3_free(ErrMsg);
-        return false;
-    }
+    int rc = sqlite3_exec((sqlite3*)DB, TCHAR_TO_UTF8(*SQL), nullptr, nullptr, &ErrMsg);
+    if (rc != SQLITE_OK) { sqlite3_free(ErrMsg); return false; }
     return true;
 }
 
@@ -80,15 +72,15 @@ TArray<TMap<FString,FString>> USaveGameSubsystem::QuerySQL(const FString& SQL) c
     if (sqlite3_prepare_v2((sqlite3*)DB, TCHAR_TO_UTF8(*SQL), -1, &Stmt, nullptr) != SQLITE_OK)
         return Rows;
 
+    int ColCount = sqlite3_column_count(Stmt);
     while (sqlite3_step(Stmt) == SQLITE_ROW)
     {
         TMap<FString,FString> Row;
-        int ColCount = sqlite3_column_count(Stmt);
         for (int i = 0; i < ColCount; ++i)
         {
-            FString ColName = UTF8_TO_TCHAR(sqlite3_column_name(Stmt, i));
-            FString ColVal  = UTF8_TO_TCHAR((const char*)sqlite3_column_text(Stmt, i));
-            Row.Add(ColName, ColVal);
+            FString Col  = UTF8_TO_TCHAR(sqlite3_column_name(Stmt, i));
+            FString Val  = UTF8_TO_TCHAR((const char*)sqlite3_column_text(Stmt, i));
+            Row.Add(Col, Val);
         }
         Rows.Add(Row);
     }
@@ -96,129 +88,84 @@ TArray<TMap<FString,FString>> USaveGameSubsystem::QuerySQL(const FString& SQL) c
     return Rows;
 }
 
-FString USaveGameSubsystem::EscapeSQL(const FString& Input) const
-{
-    // Basic SQL injection prevention — replace single quotes
-    return Input.Replace(TEXT("'"), TEXT("''"));
-}
-
 bool USaveGameSubsystem::SaveTable(const FString& Slot, const FString& DisplayName)
 {
     if (!DB) return false;
 
+    UWorld* World = GetWorld();
+    if (!World) return false;
+
     FTableSaveState State;
-    State.Slot      = Slot;
-    State.Name      = DisplayName;
-    State.Timestamp = FDateTime::UtcNow().ToUnixTimestamp();
+    State.Slot        = Slot;
+    State.Name        = DisplayName;
+    State.Timestamp   = FDateTime::UtcNow().ToUnixTimestamp();
 
-    // Collect environment
-    if (UWorld* W = GetGameInstance()->GetWorld())
+    // Collect all TableObjects
+    for (TActorIterator<ATableObject> It(World); It; ++It)
     {
-        // TODO: Read from ITGameState
-        State.Environment = TEXT("FantasyTavern");
-    }
-
-    // Collect all objects
-    for (TActorIterator<ATableObject> It(GetGameInstance()->GetWorld()); It; ++It)
         State.Objects.Add(It->GetObjectState());
+    }
 
     FString JSON;
     FJsonObjectConverter::UStructToJsonObjectString(State, JSON);
-    JSON = EscapeSQL(JSON);
 
     FString SQL = FString::Printf(
-        TEXT("INSERT OR REPLACE INTO save_slots VALUES('%s','%s','%s',%lld,%d,'%s');"),
-        *EscapeSQL(Slot),
-        *EscapeSQL(DisplayName),
-        *EscapeSQL(State.Environment),
-        State.Timestamp,
-        State.Objects.Num(),
-        *JSON
-    );
-
-    bool bOK = ExecSQL(SQL);
-    OnTableSaved.Broadcast(bOK, Slot);
-    return bOK;
+        TEXT("INSERT OR REPLACE INTO saves (slot,name,environment,timestamp,data) VALUES ('%s','%s','%s',%lld,'%s');"),
+        *Slot, *DisplayName, *State.Environment, State.Timestamp, *JSON.ReplaceCharWithEscapedChar());
+    return ExecSQL(SQL);
 }
 
 bool USaveGameSubsystem::LoadTable(const FString& Slot)
 {
-    FString SQL = FString::Printf(
-        TEXT("SELECT data FROM save_slots WHERE slot='%s';"), *EscapeSQL(Slot));
+    FString SQL = FString::Printf(TEXT("SELECT data FROM saves WHERE slot='%s';"), *Slot);
+    TArray<TMap<FString,FString>> Rows = QuerySQL(SQL);
+    if (Rows.Num() == 0) return false;
 
-    auto Rows = QuerySQL(SQL);
-    if (Rows.IsEmpty()) { OnTableLoaded.Broadcast(false, Slot); return false; }
-
-    FString JSON = Rows[0]["data"];
     FTableSaveState State;
-    if (!FJsonObjectConverter::JsonObjectStringToUStruct(JSON, &State))
-    {
-        OnTableLoaded.Broadcast(false, Slot);
+    if (!FJsonObjectConverter::JsonObjectStringToUStruct(Rows[0][TEXT("data")], &State, 0, 0))
         return false;
-    }
 
-    // Clear table
-    for (TActorIterator<ATableObject> It(GetGameInstance()->GetWorld()); It; ++It)
-        It->Destroy();
+    UWorld* World = GetWorld();
+    if (!World) return false;
 
-    // Respawn
-    UTableSpawnManager* SM = GetGameInstance()->GetSubsystem<UTableSpawnManager>();
+    // Clear existing objects
+    for (TActorIterator<ATableObject> It(World); It; ++It) { It->Destroy(); }
+
+    // Spawn saved objects
+    UTableSpawnManager* Spawner = GetGameInstance()->GetSubsystem<UTableSpawnManager>();
+    if (!Spawner) return false;
+
     for (const FTableObjectState& ObjState : State.Objects)
     {
-        ATableObject* Obj = SM->SpawnObject(ObjState.ObjectTypeID,
-                                             ObjState.Position, ObjState.Rotation);
-        if (Obj) Obj->ApplyObjectState(ObjState);
+        if (ATableObject* Obj = Spawner->SpawnObject(ObjState.ObjectTypeID, ObjState.Position, ObjState.Rotation))
+        {
+            Obj->ApplyObjectState(ObjState);
+        }
     }
-
-    OnTableLoaded.Broadcast(true, Slot);
     return true;
 }
 
 bool USaveGameSubsystem::DeleteSlot(const FString& Slot)
 {
-    return ExecSQL(FString::Printf(
-        TEXT("DELETE FROM save_slots WHERE slot='%s';"), *EscapeSQL(Slot)));
+    return ExecSQL(FString::Printf(TEXT("DELETE FROM saves WHERE slot='%s';"), *Slot));
 }
 
 TArray<FSaveSlotInfo> USaveGameSubsystem::GetSaveSlots() const
 {
-    TArray<FSaveSlotInfo> Results;
-    auto Rows = QuerySQL(
-        TEXT("SELECT slot,name,environment,timestamp,obj_count FROM save_slots ORDER BY timestamp DESC;"));
-
-    for (const auto& Row : Rows)
+    TArray<FSaveSlotInfo> Out;
+    for (auto& Row : QuerySQL(TEXT("SELECT slot,name,environment,timestamp FROM saves ORDER BY timestamp DESC;")))
     {
         FSaveSlotInfo Info;
-        Info.Slot        = Row["slot"];
-        Info.Name        = Row["name"];
-        Info.Environment = Row["environment"];
-        Info.Timestamp   = FCString::Atoi64(*Row["timestamp"]);
-        Info.ObjectCount = FCString::Atoi(*Row["obj_count"]);
-        Results.Add(Info);
+        Info.Slot        = Row[TEXT("slot")];
+        Info.Name        = Row[TEXT("name")];
+        Info.Environment = Row[TEXT("environment")];
+        Info.Timestamp   = FCString::Atoi64(*Row[TEXT("timestamp")]);
+        Out.Add(Info);
     }
-    return Results;
-}
-
-bool USaveGameSubsystem::ExportToJSON(const FString& Slot, const FString& FilePath) const
-{
-    auto Rows = QuerySQL(FString::Printf(
-        TEXT("SELECT data FROM save_slots WHERE slot='%s';"), *EscapeSQL(Slot)));
-    if (Rows.IsEmpty()) return false;
-    return FFileHelper::SaveStringToFile(Rows[0]["data"], *FilePath);
-}
-
-bool USaveGameSubsystem::ImportFromJSON(const FString& FilePath, const FString& NewSlot)
-{
-    FString JSON;
-    if (!FFileHelper::LoadFileToString(JSON, *FilePath)) return false;
-    FTableSaveState State;
-    if (!FJsonObjectConverter::JsonObjectStringToUStruct(JSON, &State)) return false;
-    State.Slot = NewSlot;
-    return SaveTable(NewSlot, State.Name);
+    return Out;
 }
 
 void USaveGameSubsystem::AutoSave()
 {
-    SaveTable(TEXT("autosave"), TEXT("Autosave"));
-    UE_LOG(LogTemp, Log, TEXT("SaveSystem: Autosave completed"));
+    SaveTable(TEXT("__autosave__"), TEXT("Autosave"));
 }

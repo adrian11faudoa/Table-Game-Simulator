@@ -1,176 +1,182 @@
-#include "ModLoadingSubsystem.h"
-#include "ModValidator.h"
+#include "Mod/ModLoadingSubsystem.h"
 #include "Scripting/LuaSubsystem.h"
-#include "Objects/TableSpawnManager.h"
-#include "Json.h"
+#include "Misc/Paths.h"
+#include "Misc/FileHelper.h"
+#include "HAL/PlatformFileManager.h"
 #include "JsonObjectConverter.h"
 
 void UModLoadingSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
-    UE_LOG(LogTemp, Log, TEXT("ModLoadingSubsystem: Ready. Mods dir: %s"), *GetModsDirectory());
-}
 
-FString UModLoadingSubsystem::GetModsDirectory() const
-{
-    return FPaths::ProjectDir() / TEXT("Mods");
-}
-
-void UModLoadingSubsystem::ScanAndLoadAll()
-{
-    TArray<FString> ModDirs;
-    IFileManager::Get().FindFiles(ModDirs, *(GetModsDirectory() / TEXT("*")), false, true);
-
-    for (const FString& Dir : ModDirs)
+    IFileManager& FM = IFileManager::Get();
+    FString Root = GetModsRootPath();
+    if (!FM.DirectoryExists(*Root))
     {
-        FString FullPath = GetModsDirectory() / Dir;
-        LoadMod(FullPath);
+        FM.MakeDirectory(*Root, true);
     }
 }
 
-bool UModLoadingSubsystem::LoadMod(const FString& ModPath)
+FString UModLoadingSubsystem::GetModsRootPath() const
 {
-    // 1. Validate
-    if (!UModValidator::ValidateMod(ModPath))
-    {
-        UE_LOG(LogTemp, Warning, TEXT("ModLoader: Validation FAILED for %s"), *ModPath);
-        OnModLoaded.Broadcast(FPaths::GetCleanFilename(ModPath), false);
-        return false;
-    }
+    return FPaths::ProjectSavedDir() / ModsDirectoryName;
+}
 
-    // 2. Parse manifest
-    FITModManifest Manifest;
-    if (!ParseManifest(ModPath, Manifest))
-    {
-        UE_LOG(LogTemp, Warning, TEXT("ModLoader: Cannot parse manifest in %s"), *ModPath);
-        OnModLoaded.Broadcast(FPaths::GetCleanFilename(ModPath), false);
-        return false;
-    }
+TArray<FString> UModLoadingSubsystem::DiscoverMods() const
+{
+    TArray<FString> Found;
+    IFileManager& FM = IFileManager::Get();
+    FString Root = GetModsRootPath();
 
-    if (IsModLoaded(Manifest.ID))
+    TArray<FString> Dirs;
+    FM.IterateDirectory(*Root, [&Dirs](const TCHAR* FilenameOrDirectory, bool bIsDirectory) -> bool
     {
-        UE_LOG(LogTemp, Warning, TEXT("ModLoader: Mod %s already loaded"), *Manifest.ID);
-        return false;
-    }
+        if (bIsDirectory) Dirs.Add(FString(FilenameOrDirectory));
+        return true;
+    });
 
-    // 3. Build loaded mod record
-    FLoadedMod Mod;
-    Mod.Manifest = Manifest;
-    Mod.ModPath  = ModPath;
-    Mod.State    = EModState::Loading;
-    Mod.LoadedAt = FDateTime::UtcNow();
-
-    // 4. Register objects
-    if (!LoadModAssets(Mod))
+    for (const FString& Dir : Dirs)
     {
-        UE_LOG(LogTemp, Warning, TEXT("ModLoader: Asset load FAILED for %s"), *Manifest.ID);
-        OnModLoaded.Broadcast(Manifest.ID, false);
-        return false;
-    }
-
-    // 5. Execute Lua entry script
-    if (!Manifest.EntryScript.IsEmpty())
-    {
-        if (!ExecuteModScript(Mod))
+        FString ManifestPath = Dir / TEXT("manifest.json");
+        if (FM.FileExists(*ManifestPath))
         {
-            UE_LOG(LogTemp, Warning, TEXT("ModLoader: Script error in %s"), *Manifest.ID);
-            OnModLoaded.Broadcast(Manifest.ID, false);
+            Found.Add(Dir);
+        }
+    }
+    return Found;
+}
+
+bool UModLoadingSubsystem::ParseManifest(const FString& JsonPath, FITModManifest& OutManifest) const
+{
+    FString JsonText;
+    if (!FFileHelper::LoadFileToString(JsonText, *JsonPath)) return false;
+    return FJsonObjectConverter::JsonObjectStringToUStruct(JsonText, &OutManifest, 0, 0);
+}
+
+bool UModLoadingSubsystem::ScanLuaForBlockedPatterns(const FString& ScriptPath, FString& OutError) const
+{
+    FString Source;
+    if (!FFileHelper::LoadFileToString(Source, *ScriptPath))
+    {
+        OutError = TEXT("Could not read script file");
+        return false;
+    }
+    for (const FString& Pattern : BlockedScriptPatterns)
+    {
+        if (Source.Contains(Pattern))
+        {
+            OutError = FString::Printf(TEXT("Script contains blocked pattern: %s"), *Pattern);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool UModLoadingSubsystem::ValidateMod(const FString& ModFolder, FString& OutError) const
+{
+    IFileManager& FM = IFileManager::Get();
+    FString ManifestPath = ModFolder / TEXT("manifest.json");
+    if (!FM.FileExists(*ManifestPath))
+    {
+        OutError = TEXT("manifest.json not found");
+        return false;
+    }
+
+    FITModManifest Manifest;
+    if (!ParseManifest(ManifestPath, Manifest))
+    {
+        OutError = TEXT("manifest.json is malformed");
+        return false;
+    }
+
+    if (Manifest.ID.IsEmpty() || Manifest.EntryScript.IsEmpty())
+    {
+        OutError = TEXT("manifest.json missing required fields (id, entry)");
+        return false;
+    }
+
+    // Block executable file types anywhere in the mod folder
+    TArray<FString> AllFiles;
+    FM.FindFilesRecursive(AllFiles, *ModFolder, TEXT("*.*"), true, false);
+    for (const FString& File : AllFiles)
+    {
+        FString Ext = FPaths::GetExtension(File, true).ToLower();
+        if (BlockedFileExtensions.Contains(Ext))
+        {
+            OutError = FString::Printf(TEXT("Mod contains blocked file type: %s"), *File);
             return false;
         }
     }
 
-    Mod.State = EModState::Loaded;
-    LoadedMods.Add(Manifest.ID, Mod);
+    // Scan the entry script (and any other .lua files) for blocked patterns
+    FString EntryPath = ModFolder / Manifest.EntryScript;
+    if (!FM.FileExists(*EntryPath))
+    {
+        OutError = TEXT("Entry script not found");
+        return false;
+    }
 
-    UE_LOG(LogTemp, Log, TEXT("ModLoader: Loaded mod '%s' v%s by %s"),
-        *Manifest.Name, *Manifest.Version, *Manifest.Author);
+    for (const FString& File : AllFiles)
+    {
+        if (FPaths::GetExtension(File).ToLower() == TEXT("lua"))
+        {
+            FString ScanError;
+            if (!ScanLuaForBlockedPatterns(File, ScanError))
+            {
+                OutError = ScanError;
+                return false;
+            }
+        }
+    }
 
-    OnModLoaded.Broadcast(Manifest.ID, true);
+    return true;
+}
+
+bool UModLoadingSubsystem::LoadMod(const FString& ModFolder)
+{
+    FString Error;
+    if (!ValidateMod(ModFolder, Error))
+    {
+        UE_LOG(LogTemp, Error, TEXT("ModLoadingSubsystem: Failed to load mod at %s: %s"), *ModFolder, *Error);
+        return false;
+    }
+
+    FITModManifest Manifest;
+    if (!ParseManifest(ModFolder / TEXT("manifest.json"), Manifest))
+        return false;
+
+    if (ULuaSubsystem* Lua = GetGameInstance()->GetSubsystem<ULuaSubsystem>())
+    {
+        FString EntryPath = ModFolder / Manifest.EntryScript;
+        if (!Lua->LoadScript(EntryPath))
+        {
+            UE_LOG(LogTemp, Error, TEXT("ModLoadingSubsystem: Lua failed to load entry script for mod %s"), *Manifest.ID);
+            return false;
+        }
+    }
+
+    LoadedMods.Add(Manifest.ID, Manifest);
+    UE_LOG(LogTemp, Log, TEXT("ModLoadingSubsystem: Loaded mod '%s' v%s"), *Manifest.Name, *Manifest.Version);
     return true;
 }
 
 bool UModLoadingSubsystem::UnloadMod(const FString& ModID)
 {
-    if (!LoadedMods.Contains(ModID)) return false;
-    LoadedMods.Remove(ModID);
-    OnModUnloaded.Broadcast(ModID);
-    return true;
+    return LoadedMods.Remove(ModID) > 0;
 }
 
-bool UModLoadingSubsystem::IsModLoaded(const FString& ModID) const
+TArray<FITModManifest> UModLoadingSubsystem::GetLoadedMods() const
 {
-    return LoadedMods.Contains(ModID);
+    TArray<FITModManifest> Out;
+    LoadedMods.GenerateValueArray(Out);
+    return Out;
 }
 
-TArray<FLoadedMod> UModLoadingSubsystem::GetLoadedMods() const
+bool UModLoadingSubsystem::HasPermission(const FString& ModID, const FString& Permission) const
 {
-    TArray<FLoadedMod> Result;
-    LoadedMods.GenerateValueArray(Result);
-    return Result;
-}
-
-bool UModLoadingSubsystem::ParseManifest(const FString& ModPath, FITModManifest& OutManifest)
-{
-    FString ManifestPath = ModPath / TEXT("manifest.json");
-    FString JsonStr;
-    if (!FFileHelper::LoadFileToString(JsonStr, *ManifestPath)) return false;
-
-    TSharedPtr<FJsonObject> JsonObj;
-    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonStr);
-    if (!FJsonSerializer::Deserialize(Reader, JsonObj) || !JsonObj.IsValid()) return false;
-
-    OutManifest.ID          = JsonObj->GetStringField(TEXT("id"));
-    OutManifest.Name        = JsonObj->GetStringField(TEXT("name"));
-    OutManifest.Version     = JsonObj->GetStringField(TEXT("version"));
-    OutManifest.Author      = JsonObj->GetStringField(TEXT("author"));
-    OutManifest.Description = JsonObj->GetStringField(TEXT("description"));
-    OutManifest.EntryScript = JsonObj->GetStringField(TEXT("entry"));
-
-    if (JsonObj->HasField(TEXT("tags")))
+    if (const FITModManifest* Manifest = LoadedMods.Find(ModID))
     {
-        for (const auto& Tag : JsonObj->GetArrayField(TEXT("tags")))
-            OutManifest.Tags.Add(Tag->AsString());
+        return Manifest->Permissions.Contains(Permission);
     }
-
-    if (JsonObj->HasField(TEXT("permissions")))
-    {
-        for (const auto& Perm : JsonObj->GetArrayField(TEXT("permissions")))
-            OutManifest.Permissions.Add(Perm->AsString());
-    }
-
-    return !OutManifest.ID.IsEmpty() && !OutManifest.EntryScript.IsEmpty();
-}
-
-bool UModLoadingSubsystem::LoadModAssets(const FLoadedMod& Mod)
-{
-    UTableSpawnManager* SM = GetGameInstance()->GetSubsystem<UTableSpawnManager>();
-    if (!SM) return true; // Not fatal
-
-    for (const FModObjectDef& ObjDef : Mod.Manifest.Objects)
-    {
-        FObjectDefinition Def;
-        Def.TypeID      = Mod.Manifest.ID + TEXT(".") + ObjDef.ID;
-        Def.Class       = ATableObject::StaticClass();
-        Def.Mass        = ObjDef.Mass;
-        Def.Friction    = ObjDef.Friction;
-        Def.Restitution = ObjDef.Restitution;
-
-        if (!ObjDef.MeshPath.IsEmpty())
-        {
-            FString FullMeshPath = Mod.ModPath / ObjDef.MeshPath;
-            // TODO: Load via RuntimeMeshImporter
-        }
-
-        SM->RegisterObjectType(Def);
-    }
-    return true;
-}
-
-bool UModLoadingSubsystem::ExecuteModScript(const FLoadedMod& Mod)
-{
-    ULuaSubsystem* Lua = GetGameInstance()->GetSubsystem<ULuaSubsystem>();
-    if (!Lua || !Lua->IsInitialized()) return false;
-
-    FString ScriptPath = Mod.ModPath / Mod.Manifest.EntryScript;
-    return Lua->LoadScript(ScriptPath);
+    return false;
 }

@@ -9,20 +9,12 @@ class INFINITYTABLE_API ATableToken : public ATableObject
     GENERATED_BODY()
 public:
     ATableToken();
+    virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutProps) const override;
 
-    virtual void GetLifetimeReplicatedProps(
-        TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated) FString TokenLabel;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated) int32   CounterValue = 0;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated) bool    bFaceUp      = true;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated) FString Label;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated) int32   Counter = 0;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated) FString IconID;
-
-    UFUNCTION(Server, Reliable, BlueprintCallable)
-    void Server_SetCounter(int32 NewValue);
-
-    UFUNCTION(Server, Reliable, BlueprintCallable)
-    void Server_IncrementCounter(int32 Delta = 1);
-
-    UFUNCTION(Server, Reliable, BlueprintCallable)
-    void Server_SetLabel(const FString& NewLabel);
+    UFUNCTION(Server, Reliable, WithValidation, BlueprintCallable) void Server_SetCounter(int32 Value);
+    UFUNCTION(Server, Reliable, WithValidation, BlueprintCallable) void Server_FlipToken();
 };

@@ -1,7 +1,8 @@
 #include "ITPlayerController.h"
 #include "Physics/GrabComponent.h"
-#include "Objects/TableDice.h"
 #include "UI/InGameHUD.h"
+#include "Objects/TableDice.h"
+#include "GameFramework/PlayerState.h"
 
 AITPlayerController::AITPlayerController()
 {
@@ -18,40 +19,28 @@ void AITPlayerController::BeginPlay()
 void AITPlayerController::SetupInputComponent()
 {
     Super::SetupInputComponent();
-
-    InputComponent->BindAction("GrabObject",     IE_Pressed,  this, &AITPlayerController::TryGrabObject);
-    InputComponent->BindAction("ReleaseObject",  IE_Released, this, &AITPlayerController::ReleaseObject);
-    InputComponent->BindAction("ContextMenu",    IE_Pressed,  this, &AITPlayerController::OpenContextMenu);
-    InputComponent->BindAction("RadialMenu",     IE_Pressed,  this, &AITPlayerController::OpenRadialMenu);
-    InputComponent->BindAction("FlipObject",     IE_Pressed,  this, &AITPlayerController::FlipHeldObject);
-    InputComponent->BindAction("LockObject",     IE_Pressed,  this, &AITPlayerController::LockHeldObject);
-    InputComponent->BindAction("DeleteObject",   IE_Pressed,  this, &AITPlayerController::DeleteSelected);
-    InputComponent->BindAction("DuplicateObject",IE_Pressed,  this, &AITPlayerController::DuplicateSelected);
-    InputComponent->BindAxis("CameraZoom",       this,         &AITPlayerController::ZoomCamera);
+    InputComponent->BindAction("GrabObject",  IE_Pressed,  this, &AITPlayerController::TryGrabObject);
+    InputComponent->BindAction("GrabObject",  IE_Released, this, &AITPlayerController::ReleaseObject);
+    InputComponent->BindAction("FlipObject",  IE_Pressed,  this, &AITPlayerController::FlipHeldObject);
+    InputComponent->BindAction("ContextMenu", IE_Pressed,  this, &AITPlayerController::OpenContextMenu);
+    InputComponent->BindAction("LockObject",  IE_Pressed,  this, &AITPlayerController::LockHeldObject);
+    InputComponent->BindAction("DeleteObject",IE_Pressed,  this, &AITPlayerController::DeleteHeldObject);
+    InputComponent->BindAction("ToggleChat",  IE_Pressed,  this, &AITPlayerController::ToggleChatFocus);
+    InputComponent->BindAction("RollDice",    IE_Pressed,  this, &AITPlayerController::RollHeldDice);
+    InputComponent->BindAction("ToggleConsole",  IE_Pressed, this, &AITPlayerController::ToggleScriptingConsole);
+    InputComponent->BindAction("ToggleSettings", IE_Pressed, this, &AITPlayerController::ToggleSettingsPanel);
+    InputComponent->BindAction("ToggleWorkshop", IE_Pressed, this, &AITPlayerController::ToggleWorkshopPanel);
+    InputComponent->BindAction("TogglePlayerList", IE_Pressed, this, &AITPlayerController::TogglePlayerListPanel);
 }
 
-void AITPlayerController::TryGrabObject()
+AITInGameHUD* AITPlayerController::GetITHUD()
 {
-    if (GrabComponent) GrabComponent->AttemptGrab();
+    if (!CachedHUD) CachedHUD = Cast<AITInGameHUD>(GetHUD());
+    return CachedHUD;
 }
 
-void AITPlayerController::ReleaseObject()
-{
-    if (GrabComponent) GrabComponent->Release();
-}
-
-void AITPlayerController::OpenContextMenu()
-{
-    if (AITHUD* HUD = GetHUD<AITHUD>())
-        HUD->ShowContextMenu(GetMousePosition2D());
-}
-
-void AITPlayerController::OpenRadialMenu()
-{
-    bRadialMenuOpen = !bRadialMenuOpen;
-    if (AITHUD* HUD = GetHUD<AITHUD>())
-        HUD->SetRadialMenuVisible(bRadialMenuOpen);
-}
+void AITPlayerController::TryGrabObject()   { if (GrabComponent) GrabComponent->AttemptGrab(); }
+void AITPlayerController::ReleaseObject()   { if (GrabComponent) GrabComponent->Release(); }
 
 void AITPlayerController::FlipHeldObject()
 {
@@ -65,41 +54,111 @@ void AITPlayerController::LockHeldObject()
     {
         ATableObject* Obj = GrabComponent->GetHeldObject();
         Obj->Server_Lock(!Obj->bPhysicsLocked);
+    }
+}
+
+void AITPlayerController::DeleteHeldObject()
+{
+    if (GrabComponent && GrabComponent->GetHeldObject())
+    {
         GrabComponent->Release();
+        GrabComponent->GetHeldObject()->Destroy();
     }
 }
 
-void AITPlayerController::ZoomCamera(float AxisValue)
+void AITPlayerController::RollHeldDice()
 {
-    if (APawn* P = GetPawn())
+    if (GrabComponent && GrabComponent->GetHeldObject())
     {
-        FVector Location = P->GetActorLocation();
-        Location.Z = FMath::Clamp(Location.Z + AxisValue * CameraZoomSpeed, 100.0f, 2000.0f);
-        P->SetActorLocation(Location);
+        if (ATableDice* Dice = Cast<ATableDice>(GrabComponent->GetHeldObject()))
+        {
+            FVector Impulse(FMath::RandRange(-50.f, 50.f), FMath::RandRange(-50.f, 50.f), 400.f);
+            Dice->Server_Roll(Impulse);
+        }
     }
 }
 
-bool AITPlayerController::Server_SendChatMessage_Validate(const FString& Message)
+void AITPlayerController::OpenContextMenu()
 {
-    return Message.Len() > 0 && Message.Len() <= 256;
-}
-
-void AITPlayerController::Server_SendChatMessage_Implementation(const FString& Message)
-{
-    if (AITGameState* GS = GetWorld()->GetGameState<AITGameState>())
+    if (AITInGameHUD* HUD = GetITHUD())
     {
-        // Broadcast to all players via multicast
-        // Implementation fires a replicated event on game state
+        if (GrabComponent && GrabComponent->GetHeldObject())
+        {
+            HUD->OpenRadialMenuForObject(GrabComponent->GetHeldObject());
+        }
+        else
+        {
+            HUD->ShowRadialMenu(true);
+        }
     }
 }
 
-bool AITPlayerController::Server_RollDice_Validate(ATableDice* Dice, FVector Impulse)
+void AITPlayerController::ToggleChatFocus()
 {
-    return IsValid(Dice) && Impulse.Size() < 5000.0f;
+    if (AITInGameHUD* HUD = GetITHUD())
+    {
+        HUD->ShowChat(true);
+    }
 }
 
-void AITPlayerController::Server_RollDice_Implementation(ATableDice* Dice, FVector Impulse)
+void AITPlayerController::ToggleScriptingConsole()
 {
-    if (IsValid(Dice))
-        Dice->Server_Roll(Impulse);
+    if (AITInGameHUD* HUD = GetITHUD())
+    {
+        HUD->ToggleScriptingConsole();
+    }
+}
+
+void AITPlayerController::ToggleSettingsPanel()
+{
+    if (AITInGameHUD* HUD = GetITHUD())
+    {
+        HUD->ShowSettings(true);
+    }
+}
+
+void AITPlayerController::ToggleWorkshopPanel()
+{
+    if (AITInGameHUD* HUD = GetITHUD())
+    {
+        HUD->ShowWorkshop(true);
+    }
+}
+
+void AITPlayerController::TogglePlayerListPanel()
+{
+    if (AITInGameHUD* HUD = GetITHUD())
+    {
+        HUD->ShowPlayerList(true);
+    }
+}
+
+bool AITPlayerController::Server_SendChatMessage_Validate(const FString& Msg)
+{
+    return Msg.Len() > 0 && Msg.Len() <= 256;
+}
+
+void AITPlayerController::Server_SendChatMessage_Implementation(const FString& Msg)
+{
+    FString SenderName = PlayerState ? PlayerState->GetPlayerName() : TEXT("Player");
+
+    // Broadcast to every connected player controller
+    if (UWorld* World = GetWorld())
+    {
+        for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+        {
+            if (AITPlayerController* PC = Cast<AITPlayerController>(It->Get()))
+            {
+                PC->Client_ReceiveChatMessage(SenderName, Msg);
+            }
+        }
+    }
+}
+
+void AITPlayerController::Client_ReceiveChatMessage_Implementation(const FString& SenderName, const FString& Message)
+{
+    if (AITInGameHUD* HUD = GetITHUD())
+    {
+        HUD->AddChatMessage(SenderName, Message);
+    }
 }

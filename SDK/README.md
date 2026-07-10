@@ -1,62 +1,63 @@
-# InfinityTable — Modding SDK
-
-Welcome to the InfinityTable Mod SDK. This directory contains everything you need to create, test, and publish tabletop games and tools for InfinityTable.
+# InfinityTable — Mod SDK
 
 ## Quick Start
 
 ```
 SDK/
-├── README.md               ← You are here
-├── LuaAPI.md               ← Complete Lua API reference
-├── ModManifest.schema.json ← JSON schema for manifest validation
-└── Examples/
-    ├── Chess/              ← Full 8x8 chess implementation
-    ├── Checkers/           ← 8x8 checkers with forced captures
-    ├── DiceGame/           ← Dice Battle for 2-6 players
-    └── RPGCampaign/        ← D&D-style RPG with fog of war
+├── README.md
+├── Examples/
+│   ├── Chess/          -- Full chess with move validation
+│   ├── Checkers/       -- Forced captures + king promotion
+│   ├── DiceGame/       -- Dice Battle for 2-6 players
+│   └── RPGCampaign/    -- D&D RPG with fog of war & GM tools
 ```
 
-## Creating a Mod
+## Create a Mod in 3 Steps
 
-1. Create a folder inside `InfinityTable/Mods/your_mod_id/`
-2. Add a `manifest.json` (see schema below)
-3. Write your `scripts/main.lua` using the Lua API
-4. Place assets in `assets/` (`.obj`, `.gltf`, `.png`)
-5. Load in-game: **Main Menu → Workshop → Load Local Mod**
+**1. Create folder:** `InfinityTable/Saved/Mods/my_mod/`
 
-## Manifest Minimum Example
+(`Saved/Mods/` is created automatically on first run by `UModLoadingSubsystem`;
+you can also override the folder name via its `ModsDirectoryName` property if
+you'd rather use something else.)
 
+**2. Add manifest.json:**
 ```json
 {
-  "id": "my_game",
+  "id": "my_mod",
   "name": "My Game",
   "version": "1.0.0",
-  "author": "Your Name",
-  "description": "A fun tabletop game.",
+  "author": "You",
+  "description": "A fun game.",
   "entry": "scripts/main.lua",
   "permissions": ["spawnObjects", "networkSync", "showUI"]
 }
 ```
 
-## Lua Entry Point Pattern
-
+**3. Write scripts/main.lua:**
 ```lua
--- Every mod starts by listening for GameStart
 Events.on("GameStart", function()
-    -- spawn your board, set up state, show welcome message
+    Objects.spawn("d6", { position = {0, 0, 10} })
+    UI.showMessage("Game ready!")
 end)
 ```
 
-## Useful Resources
+## Available Lua APIs
 
-- **Lua API Reference**: `SDK/LuaAPI.md`
-- **Architecture Overview**: `Docs/Architecture.md`
-- **Save System**: `Docs/Architecture.md#save-system-documentation`
-- **Asset Import**: `Docs/Architecture.md#asset-import-guide`
-- **Community Discord**: https://discord.gg/infinitytable
-- **Workshop**: https://steamcommunity.com/app/infinitytable/workshop/
+| Namespace | Key Functions |
+|-----------|--------------|
+| `Objects` | spawn, destroy, getAll, getByType |
+| `Events`  | on, emit |
+| `Table`   | getPlayerCount, broadcast, clearTable |
+| `UI`      | showMessage |
+| `Game`    | endGame, setVariable, getVariable |
+| `RPG`     | fogOfWar, grid, initiative |
 
-## License
+## Permissions
 
-All SDK example code is released under the MIT License.  
-You retain full ownership of your mod's content.
+| Permission     | Allows |
+|----------------|--------|
+| spawnObjects   | Objects.spawn / destroy |
+| networkSync    | Replicate state to all clients |
+| showUI         | UI.showMessage / createPanel |
+| readSave       | Table.load |
+| writeSave      | Table.save |

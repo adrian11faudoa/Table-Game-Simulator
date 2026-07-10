@@ -1,24 +1,8 @@
 #pragma once
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
-#include "ModManifest.h"
+#include "Mod/ModManifest.h"
 #include "ModLoadingSubsystem.generated.h"
-
-UENUM(BlueprintType)
-enum class EModState : uint8 { NotLoaded, Loading, Loaded, Failed };
-
-USTRUCT(BlueprintType)
-struct FLoadedMod
-{
-    GENERATED_BODY()
-    UPROPERTY(BlueprintReadOnly) FITModManifest Manifest;
-    UPROPERTY(BlueprintReadOnly) EModState      State = EModState::NotLoaded;
-    UPROPERTY(BlueprintReadOnly) FString        ModPath;
-    UPROPERTY(BlueprintReadOnly) FDateTime      LoadedAt;
-};
-
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnModLoaded,  const FString&, ModID, bool, bSuccess);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnModUnloaded, const FString&, ModID);
 
 UCLASS()
 class INFINITYTABLE_API UModLoadingSubsystem : public UGameInstanceSubsystem
@@ -27,31 +11,24 @@ class INFINITYTABLE_API UModLoadingSubsystem : public UGameInstanceSubsystem
 public:
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 
-    UFUNCTION(BlueprintCallable, Category="Mods")
-    bool LoadMod(const FString& ModPath);
+    UFUNCTION(BlueprintCallable) TArray<FString> DiscoverMods() const;
+    UFUNCTION(BlueprintCallable) bool ValidateMod(const FString& ModFolder, FString& OutError) const;
+    UFUNCTION(BlueprintCallable) bool LoadMod(const FString& ModFolder);
+    UFUNCTION(BlueprintCallable) bool UnloadMod(const FString& ModID);
+    UFUNCTION(BlueprintCallable) TArray<FITModManifest> GetLoadedMods() const;
+    UFUNCTION(BlueprintCallable) bool HasPermission(const FString& ModID, const FString& Permission) const;
 
-    UFUNCTION(BlueprintCallable, Category="Mods")
-    bool UnloadMod(const FString& ModID);
-
-    UFUNCTION(BlueprintCallable, Category="Mods")
-    TArray<FLoadedMod> GetLoadedMods() const;
-
-    UFUNCTION(BlueprintCallable, Category="Mods")
-    bool IsModLoaded(const FString& ModID) const;
-
-    UFUNCTION(BlueprintCallable, Category="Mods")
-    FString GetModsDirectory() const;
-
-    UFUNCTION(BlueprintCallable, Category="Mods")
-    void ScanAndLoadAll();
-
-    UPROPERTY(BlueprintAssignable) FOnModLoaded   OnModLoaded;
-    UPROPERTY(BlueprintAssignable) FOnModUnloaded OnModUnloaded;
+    UPROPERTY(EditDefaultsOnly) FString ModsDirectoryName = TEXT("Mods");
+    UPROPERTY(EditDefaultsOnly) TArray<FString> BlockedScriptPatterns = {
+        TEXT("os."), TEXT("io."), TEXT("require("), TEXT("loadstring("), TEXT("dofile(")
+    };
+    UPROPERTY(EditDefaultsOnly) TArray<FString> BlockedFileExtensions = {
+        TEXT(".exe"), TEXT(".dll"), TEXT(".so"), TEXT(".bat"), TEXT(".sh")
+    };
 
 private:
-    TMap<FString, FLoadedMod> LoadedMods;
-
-    bool ParseManifest(const FString& ModPath, FITModManifest& OutManifest);
-    bool LoadModAssets(const FLoadedMod& Mod);
-    bool ExecuteModScript(const FLoadedMod& Mod);
+    UPROPERTY() TMap<FString, FITModManifest> LoadedMods;
+    FString GetModsRootPath() const;
+    bool ParseManifest(const FString& JsonPath, FITModManifest& OutManifest) const;
+    bool ScanLuaForBlockedPatterns(const FString& ScriptPath, FString& OutError) const;
 };
